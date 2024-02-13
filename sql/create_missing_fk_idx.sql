@@ -1,44 +1,52 @@
-DECLARE @tableName NVARCHAR(128)
-DECLARE @constraintName NVARCHAR(128)
-DECLARE @indexName NVARCHAR(128)
-DECLARE @sql NVARCHAR(MAX)
+DECLARE @TableName NVARCHAR(255)
+DECLARE @ForeignKeyName NVARCHAR(255)
+DECLARE @IndexName NVARCHAR(255)
+DECLARE @SQL NVARCHAR(MAX)
 
--- Cursor to loop through all foreign keys without an index
-DECLARE curForeignKeys CURSOR FOR
-SELECT
-    OBJECT_NAME(fkc.parent_object_id) AS TableName,
-    fkc.name AS ConstraintName
-FROM
-    sys.foreign_keys AS fkc
-    LEFT JOIN sys.index_columns AS ic ON fkc.parent_object_id = ic.object_id
-                                        AND ic.index_id = fkc.unique_index_id
-WHERE
-    ic.object_id IS NULL
+-- Cursor to iterate through tables and their foreign keys
+DECLARE ForeignKeyCursor CURSOR FOR
+SELECT 
+    OBJECT_NAME(f.parent_object_id) AS TableName,
+    f.name AS ForeignKeyName,
+    i.name AS IndexName
+FROM 
+    sys.foreign_keys AS f
+INNER JOIN 
+    sys.indexes AS i ON f.parent_object_id = i.object_id
+WHERE 
+    i.is_primary_key = 0 -- Exclude primary keys as they're usually already indexed
+    AND i.is_unique_constraint = 0 -- Exclude unique constraints as they're already indexed
+ORDER BY 
+    TableName, ForeignKeyName;
 
-OPEN curForeignKeys
+-- Open cursor
+OPEN ForeignKeyCursor;
 
-FETCH NEXT FROM curForeignKeys INTO @tableName, @constraintName
+-- Fetch the first row
+FETCH NEXT FROM ForeignKeyCursor INTO @TableName, @ForeignKeyName, @IndexName;
 
+-- Loop through the cursor
 WHILE @@FETCH_STATUS = 0
 BEGIN
     -- Generate index name
-    SET @indexName = 'IX_' + @tableName + '_' + @constraintName
+    SET @IndexName = 'IX_' + @TableName + '_' + @ForeignKeyName;
 
-    -- Generate dynamic SQL to create the index
-    SET @sql = 'CREATE INDEX ' + QUOTENAME(@indexName) + ' ON ' + QUOTENAME(@tableName) + ' (' +
-               STUFF((
-                       SELECT ', ' + QUOTENAME(col_name(ic.parent_object_id, ic.parent_column_id))
-                       FROM sys.foreign_key_columns AS ic
-                       WHERE fk.name = @constraintName
-                       FOR XML PATH('')
-                   ), 1, 2, '') + ')'
+    -- Generate dynamic SQL for creating index
+    SET @SQL = 'CREATE INDEX ' + QUOTENAME(@IndexName) + ' ON ' + QUOTENAME(@TableName) + '(' + 
+               (SELECT STRING_AGG(QUOTENAME(c.name), ', ') 
+                FROM sys.columns AS c 
+                INNER JOIN sys.foreign_key_columns AS fk 
+                ON c.object_id = fk.referenced_object_id AND c.column_id = fk.referenced_column_id 
+                WHERE fk.parent_object_id = OBJECT_ID(@TableName) AND fk.constraint_object_id = OBJECT_ID(@ForeignKeyName)) +
+               ')';
 
     -- Execute dynamic SQL
-    EXEC sp_executesql @sql
+    EXEC sp_executesql @SQL;
 
-    -- Fetch next foreign key
-    FETCH NEXT FROM curForeignKeys INTO @tableName, @constraintName
+    -- Fetch the next row
+    FETCH NEXT FROM ForeignKeyCursor INTO @TableName, @ForeignKeyName, @IndexName;
 END
 
-CLOSE curForeignKeys
-DEALLOCATE curForeignKeys
+-- Close cursor
+CLOSE ForeignKeyCursor;
+DEALLOCATE ForeignKeyCursor;
